@@ -66,22 +66,47 @@ jobs:
 
       - name: Run Vale and Report to GitHub PR
         run: |
-          # Ensure Vale can see the configuration and styles
-          /usr/local/bin/vale sync
+          # Ditch vale sync as it's unnecessary and problematic
           
           # Execute Vale and store output in a variable
           VALE_OUTPUT=$(/usr/local/bin/vale --output=JSON --no-exit docs)
           
-          # Check if the 'Results' array is not empty before piping to reviewdog.
-          if echo "$VALE_OUTPUT" | jq -e '.Results | length > 0' > /dev/null; then
+          # CRITICAL FIX: Use a robust jq filter that works regardless of the Vale version's JSON structure.
+          # We check if the JSON is an array (old version) or an object with a 'Results' key (new version).
+          # Then, we filter the results and pipe them to reviewdog.
+          
+          # Filter the results to get a stream of valid RDJSONL objects
+          VALID_OUTPUT=$(echo "$VALE_OUTPUT" | jq -c '
+              # If the top level is an object and has a Results array (new Vale), use that
+              if type == "object" and .Results? then .Results[]
+              # If the top level is an array (old Vale), use the array directly
+              elif type == "array" then .[]
+              # Otherwise, output nothing
+              else empty
+              end 
+              | {
+                  message: .Message, 
+                  location: {
+                      path: .Location.Path, 
+                      range: {
+                          start: {line: .Location.Span.Start.Line, column: .Location.Span.Start.Column}, 
+                          end: {line: .Location.Span.End.Line, column: .Location.Span.End.Column}
+                      }
+                  }, 
+                  severity: .Level
+              } 
+              | select(.severity) # Filter out any null results
+          ')
+          
+          # CRITICAL FIX: Check if the VALID_OUTPUT variable is NOT empty before running reviewdog
+          if [ -n "$VALID_OUTPUT" ]; then
             echo "Vale found issues. Sending results to Reviewdog..."
             
-            echo "$VALE_OUTPUT" \
-            | jq -c '.Results[] | . | {message, location: {path: .Location.Path, range: {start: {line: .Location.Span.Start.Line, column: .Location.Span.Start.Column}, end: {line: .Location.Span.End.Line, column: .Location.Span.End.Column}}}, severity: .Level}' \
+            echo "$VALID_OUTPUT" \
             | /usr/local/bin/reviewdog -f=rdjsonl \
               -name="Vale Linter" \
               -reporter=github-pr-review \
-              -level=warning
+              -level=warning \
               -filter-mode=added \
               -fail-on-error: true
           else
