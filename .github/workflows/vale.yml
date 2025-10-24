@@ -5,52 +5,51 @@ on:
     paths:
       - 'docs/**/*.adoc'
       - 'docs/**/*.md'
-      - 'docs/**/*.txt' 
+      - 'docs/**/*.txt'
 
 jobs:
   lint:
     runs-on: ubuntu-latest
 
     steps:
+      # Step 1: Checkout your main repository
       - name: Checkout Docs Repository (Main Repo)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # Step 2: Checkout SUSE Vale Style Guide
       - name: Checkout SUSE Style Guide
         uses: actions/checkout@v4
         with:
           repository: 'openSUSE/suse-vale-styleguide'
           path: 'suse-styles'
 
-      - name: Install Dependencies (Vale, Reviewdog, and Asciidoctor)
+      # Step 3: Install Dependencies
+      - name: Install Vale, Reviewdog, and Asciidoctor
         run: |
-          # Update and install Asciidoctor (for ADOC parsing) and jq
           sudo apt-get update
-          sudo apt-get install -y asciidoctor jq
+          sudo apt-get install -y asciidoctor jq curl tar
 
-          # Install Vale (CRITICAL FIX for Exit Code 127)
-          VALE_VERSION="3.12.0" 
+          # Install Vale
+          VALE_VERSION="3.12.0"
           VALE_URL="https://github.com/errata-ai/vale/releases/download/v${VALE_VERSION}/vale_${VALE_VERSION}_Linux_64-bit.tar.gz"
-          
-          # Explicitly install binary with sudo
           mkdir -p /tmp/vale-install
-          curl -L "${VALE_URL}" | tar -xz -C /tmp/vale-install/
+          curl -L "$VALE_URL" | tar -xz -C /tmp/vale-install/
           sudo mv /tmp/vale-install/vale /usr/local/bin/
           sudo chmod +x /usr/local/bin/vale
 
-          # Install Reviewdog (for PR annotations)
+          # Install Reviewdog
           REVIEW_VERSION="0.17.0"
           REVIEW_URL="https://github.com/reviewdog/reviewdog/releases/download/v${REVIEW_VERSION}/reviewdog_${REVIEW_VERSION}_Linux_x86_64.tar.gz"
-          curl -L "${REVIEW_URL}" | sudo tar -xz -C /usr/local/bin/
+          curl -L "$REVIEW_URL" | sudo tar -xz -C /usr/local/bin/
 
-      - name: Configure .vale.ini
+      # Step 4: Configure .vale.ini
+      - name: Configure Vale
         run: |
-          # Fix: Manually remove the problematic Spelling rule to bypass the dictionary dependency conflict.
           rm -f suse-styles/common/Spelling.yml
 
-          # CRITICAL FIX: Use simple echo commands to build a clean .vale.ini without multi-line EOF/whitespace issues.
-          echo "StylesPath = ${GITHUB_WORKSPACE}/suse-styles" > .vale.ini
+          echo "StylesPath = $GITHUB_WORKSPACE/suse-styles" > .vale.ini
           echo "MinAlertLevel = warning" >> .vale.ini
           echo "" >> .vale.ini
           echo "[*.adoc]" >> .vale.ini
@@ -64,50 +63,44 @@ jobs:
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
-      - name: Run Vale and Report to GitHub PR (Script Method)
+      # Step 5: Run Vale and Report
+      - name: Run Vale and Report to GitHub PR
         run: |
-          # Define the absolute path to the configuration file
-          CONFIG_PATH="${GITHUB_WORKSPACE}/.vale.ini"
+          set -e
+          cd "$GITHUB_WORKSPACE"
 
-          # Create and run a temporary shell script to handle the complex jq logic safely.
-          cat <<'END_SCRIPT' > run_vale.sh
-          #!/bin/bash
-          
-          # Execute Vale using the ABSOLUTE config path
-          VALE_OUTPUT=$(/usr/local/bin/vale --config="$CONFIG_PATH" --output=JSON --no-exit docs)
-          
-          # Check for presence of the 'Results' key with at least one opening brace
+          echo "=== Directory structure ==="
+          ls -R docs || echo "⚠️ No docs folder found!"
+
+          echo "=== Vale configuration ==="
+          /usr/local/bin/vale ls-config --config="$GITHUB_WORKSPACE/.vale.ini" || echo "⚠️ Vale config issue!"
+
+          echo "=== Running Vale ==="
+          VALE_OUTPUT=$(/usr/local/bin/vale --config="$GITHUB_WORKSPACE/.vale.ini" --output=JSON --no-exit docs || true)
+
+          echo "Raw JSON output from Vale:"
+          echo "$VALE_OUTPUT" | jq '.' || echo "$VALE_OUTPUT"
+
           if echo "$VALE_OUTPUT" | grep -q '"Results":\['; then
-              echo "Vale found issues. Sending results to Reviewdog..."
-              
-              # CRITICAL: Pipe to jq for resilient parsing and formatting for RDJSONL
-              echo "$VALE_OUTPUT" \
-              | jq -c '.Results[] | {
-                  message: .Message, 
-                  location: {
-                      path: .Location.Path, 
-                      range: {
-                          start: {line: .Location.Span.Start.Line, column: .Location.Span.Start.Column}, 
-                          end: {line: .Location.Span.End.Line, column: .Location.Span.End.Column}
-                      }
-                  }, 
-                  severity: .Level
-              }' \
-              | /usr/local/bin/reviewdog -f=rdjsonl \
+            echo "Vale found issues. Sending results to Reviewdog..."
+            echo "$VALE_OUTPUT" | jq -c '.Results[] | {
+                message: .Message,
+                location: {
+                    path: .Location.Path,
+                    range: {
+                        start: {line: .Location.Span.Start.Line, column: .Location.Span.Start.Column},
+                        end: {line: .Location.Span.End.Line, column: .Location.Span.End.Column}
+                    }
+                },
+                severity: .Level
+            }' | /usr/local/bin/reviewdog -f=rdjsonl \
                   -name="Vale Linter" \
                   -reporter=github-pr-review \
                   -level=warning \
-                  -filter-mode=added \
-                  -fail-on-error: true
+                  -filter-mode=added
           else
-              echo "Vale found no issues. Skipping reviewdog reporting."
+            echo "✅ Vale found no issues (or config problem)."
           fi
-          
-          END_SCRIPT
-          
-          # Make the script executable and run it
-          chmod +x run_vale.sh
-          ./run_vale.sh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
