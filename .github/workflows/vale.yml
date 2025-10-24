@@ -49,9 +49,10 @@ jobs:
           # Fix: Manually remove the problematic Spelling rule to bypass the dictionary dependency conflict.
           rm -f suse-styles/common/Spelling.yml
 
-          # CRITICAL FIX: Removed single quotes from 'EOF' to force shell interpolation of the variable.
+          # CRITICAL FIX: Remove all leading whitespace inside the cat <<EOF block 
+          # to prevent the path from being broken by invisible spaces.
           cat <<EOF > .vale.ini
-          StylesPath = ${GITHUB_WORKSPACE}/suse-styles # The variable will now be expanded to the absolute path
+          StylesPath = ${GITHUB_WORKSPACE}/suse-styles # ABSOLUTE PATH FIX
           MinAlertLevel = warning
                               
           [*.adoc]
@@ -68,12 +69,15 @@ jobs:
 
       - name: Run Vale and Report to GitHub PR (Script Method)
         run: |
+          # Define the absolute path to the configuration file for the script
+          CONFIG_PATH="${GITHUB_WORKSPACE}/.vale.ini"
+
           # Create and run a temporary shell script to handle the complex jq logic safely.
           cat <<'END_SCRIPT' > run_vale.sh
           #!/bin/bash
           
-          # Execute Vale and store output
-          VALE_OUTPUT=$(/usr/local/bin/vale --output=JSON --no-exit docs)
+          # Execute Vale using the ABSOLUTE config path
+          VALE_OUTPUT=$(/usr/local/bin/vale --config="$CONFIG_PATH" --output=JSON --no-exit docs)
           
           # Check for presence of the 'Results' key with at least one opening brace
           if echo "$VALE_OUTPUT" | grep -q '"Results":\['; then
