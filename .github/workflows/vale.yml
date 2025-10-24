@@ -49,18 +49,14 @@ jobs:
           # Fix: Manually remove the problematic Spelling rule to bypass the dictionary dependency conflict.
           rm -f suse-styles/common/Spelling.yml
 
-          # CRITICAL FIX: Remove all leading whitespace inside the cat <<EOF block 
-          # to prevent the path from being broken by invisible spaces.
+          # CRITICAL FIX: The lines inside the cat block must be absolutely flush to prevent path-breaking whitespace.
           cat <<EOF > .vale.ini
-          StylesPath = ${GITHUB_WORKSPACE}/suse-styles # ABSOLUTE PATH FIX
+          StylesPath = ${GITHUB_WORKSPACE}/suse-styles
           MinAlertLevel = warning
-                              
           [*.adoc]
           BasedOnStyles = common, asciidoc
-                              
           [*.md]
           BasedOnStyles = common
-
           [*.txt]
           BasedOnStyles = common
           EOF
@@ -69,7 +65,7 @@ jobs:
 
       - name: Run Vale and Report to GitHub PR (Script Method)
         run: |
-          # Define the absolute path to the configuration file for the script
+          # Define the absolute path to the configuration file
           CONFIG_PATH="${GITHUB_WORKSPACE}/.vale.ini"
 
           # Create and run a temporary shell script to handle the complex jq logic safely.
