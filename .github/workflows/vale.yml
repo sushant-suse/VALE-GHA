@@ -66,7 +66,7 @@ jobs:
           echo "BasedOnStyles = common" >> .vale.ini
 
       # Step 5: Run Vale and post results to PR
-      - name: Run Vale and Post Results to PR
+      - name: Run Vale and Post/Update PR Comment
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -77,32 +77,35 @@ jobs:
           VALE_OUTPUT=$(/usr/local/bin/vale --config="$GITHUB_WORKSPACE/.vale.ini" --output=JSON --no-exit docs || true)
           echo "$VALE_OUTPUT" | jq '.' > vale_output.json
 
-          # PR information
+          # Get PR information
           PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
           COMMENTS_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
 
-          # Function to find any existing Vale comment by the bot
+          # Function: find existing Vale comment by the bot
           find_existing_comment() {
             curl -s -H "Authorization: token $GITHUB_TOKEN" "$COMMENTS_URL" \
               | jq -r '.[] | select(.user.login=="github-actions[bot]") | select(.body|test("Vale Linter Report|No Vale issues found")) | .id' \
               | head -n 1
           }
 
+          # Correct SUSE Style Guide URL
+          STYLE_GUIDE_URL="https://documentation.suse.com/style/current/html/style-guide-adoc/index.html"
+
           # CASE 1: No Vale issues found
           if ! echo "$VALE_OUTPUT" | grep -q '"Severity"'; then
             echo "✅ No Vale issues found."
-            COMMENT_BODY=$(jq -Rs . <<< "✅ No Vale issues found — great job following the [SUSE Style Guide](https://documentation.suse.com/style/current/html/style-guide-adoc/index.html)!")
+            COMMENT_BODY=$(jq -Rs . <<< "✅ No Vale issues found — great job following the [SUSE Style Guide]($STYLE_GUIDE_URL)!")
 
             COMMENT_ID=$(find_existing_comment)
             if [ -n "$COMMENT_ID" ]; then
               echo "🪄 Updating existing Vale comment (#$COMMENT_ID)"
               curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
-                   -d "{\"body\": $COMMENT_BODY}" \
-                   "$COMMENTS_URL/$COMMENT_ID" > /dev/null
+                  -d "{\"body\": $COMMENT_BODY}" \
+                  "$COMMENTS_URL/$COMMENT_ID" > /dev/null
             else
               echo "💬 Creating new 'no issues' comment"
               curl -s -H "Authorization: token $GITHUB_TOKEN" \
-                   -X POST -d "{\"body\": $COMMENT_BODY}" "$COMMENTS_URL" > /dev/null
+                  -X POST -d "{\"body\": $COMMENT_BODY}" "$COMMENTS_URL" > /dev/null
             fi
             exit 0
           fi
@@ -125,24 +128,24 @@ jobs:
           ' vale_output.json >> vale_report.md
 
           echo "" >> vale_report.md
-          echo "For more details, see the [SUSE Style Guide](https://documentation.suse.com/style/current/html/style-guide-adoc/index.html)." >> vale_report.md
+          echo "For more details, see the [SUSE Style Guide]($STYLE_GUIDE_URL)." >> vale_report.md
 
           echo "Generated Vale Report:"
           cat vale_report.md
 
           # Post or update Vale report comment
-          COMMENT_BODY=$(jq -Rs . < vale_report.md)
+          COMMENT_BODY=$(jq -Rs . < vale_report.md | sed "s|https://documentation.suse.com/style/current/html/docu_styleguide/|$STYLE_GUIDE_URL|g")
           COMMENT_ID=$(find_existing_comment)
 
           if [ -n "$COMMENT_ID" ]; then
             echo "🪄 Updating existing Vale report comment (#$COMMENT_ID)"
             curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
-                 -d "{\"body\": $COMMENT_BODY}" \
-                 "$COMMENTS_URL/$COMMENT_ID" > /dev/null
+                -d "{\"body\": $COMMENT_BODY}" \
+                "$COMMENTS_URL/$COMMENT_ID" > /dev/null
           else
             echo "💬 Creating new Vale report comment"
             curl -s -H "Authorization: token $GITHUB_TOKEN" \
-                 -X POST -d "{\"body\": $COMMENT_BODY}" "$COMMENTS_URL" > /dev/null
+                -X POST -d "{\"body\": $COMMENT_BODY}" "$COMMENTS_URL" > /dev/null
           fi
 
           echo "✅ Vale report posted/updated on PR #$PR_NUMBER"
