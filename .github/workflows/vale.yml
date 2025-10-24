@@ -70,9 +70,13 @@ jobs:
           PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
           COMMENTS_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
 
+          # Find existing Vale comment (flexible matching)
           find_existing_comment() {
             curl -s -H "Authorization: token $GITHUB_TOKEN" "$COMMENTS_URL" \
-              | jq -r '.[] | select(.user.login=="github-actions[bot]") | select(.body|test("📝 Vale Linter Report|No Vale issues found")) | .id' \
+              | jq -r '.[] 
+                  | select(.user.login=="github-actions[bot]") 
+                  | select(.body | contains("Vale Linter Report") or contains("No Vale issues found")) 
+                  | .id' \
               | head -n 1
           }
 
@@ -84,10 +88,12 @@ jobs:
             COMMENT_ID=$(find_existing_comment)
 
             if [ -n "$COMMENT_ID" ]; then
+              # Update existing comment
               curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
                   -d "{\"body\": $COMMENT_BODY}" \
                   "$COMMENTS_URL/$COMMENT_ID" > /dev/null
             else
+              # Create new comment
               curl -s -H "Authorization: token $GITHUB_TOKEN" \
                   -X POST -d "{\"body\": $COMMENT_BODY}" "$COMMENTS_URL" > /dev/null
             fi
@@ -118,10 +124,12 @@ jobs:
           COMMENT_ID=$(find_existing_comment)
 
           if [ -n "$COMMENT_ID" ]; then
+            # Update existing comment
             curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
                 -d "{\"body\": $COMMENT_BODY}" \
                 "$COMMENTS_URL/$COMMENT_ID" > /dev/null
           else
+            # Create new comment
             curl -s -H "Authorization: token $GITHUB_TOKEN" \
                 -X POST -d "{\"body\": $COMMENT_BODY}" "$COMMENTS_URL" > /dev/null
           fi
