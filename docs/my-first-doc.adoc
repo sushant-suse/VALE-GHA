@@ -1,3 +1,8 @@
-= Title
+= My First Document
 
-This document was written to test the Vale linter.
+This document was created for the purpose of testing the linter.
+
+The user's actions will be analyzed for errors. We can't really do nothing to stop it.
+
+I have some CD's on my shelf.
+I have some CD's on my shelf number-2.

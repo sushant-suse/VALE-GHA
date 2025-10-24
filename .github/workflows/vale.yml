@@ -1,39 +1,221 @@
 name: Vale Linting
 
+# Trigger this workflow on pull requests that modify docs files
 on:
   pull_request:
+    # Only run on changes to these file types in the docs folder
     paths:
       - 'docs/**/*.adoc'
       - 'docs/**/*.md'
+      - 'docs/**/*.txt'
+
+# Define the permissions this workflow needs
+permissions:
+  contents: read          # Needed to fetch repository content
+  pull-requests: write    # Needed to update PR comments
+  issues: write           # Needed to post comments (issues API)
 
 jobs:
   lint:
+    # Run this job on the latest Ubuntu VM
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout docs repository
+      # Step 1: Checkout the PR repository so we can lint its files
+      - name: Checkout Docs Repository
         uses: actions/checkout@v4
         with:
-          path: 'main-repo'
+          fetch-depth: 0  # Ensure full history is available (needed for PR comparison)
 
-      - name: Checkout SUSE style guide
+      # Step 2: Checkout the SUSE Vale Style Guide repository
+      - name: Checkout SUSE Style Guide
         uses: actions/checkout@v4
         with:
           repository: 'openSUSE/suse-vale-styleguide'
-          path: 'suse-styles'
+          path: 'suse-styles'  # Checkout into a specific folder
 
+      # Step 3: Install dependencies
+      - name: Install Vale, jq, and Asciidoctor
+        run: |
+          # Update package list
+          sudo apt-get update
+
+          # Install Asciidoctor (for .adoc processing), jq (JSON parsing), curl, tar
+          sudo apt-get install -y asciidoctor jq curl tar
+
+          # Set the Vale version to install
+          VALE_VERSION="3.12.0"
+
+          # URL to download the Vale tar.gz
+          VALE_URL="https://github.com/errata-ai/vale/releases/download/v${VALE_VERSION}/vale_${VALE_VERSION}_Linux_64-bit.tar.gz"
+
+          # Prepare temporary install directory
+          mkdir -p /tmp/vale-install
+
+          # Download and extract Vale
+          curl -L "$VALE_URL" | tar -xz -C /tmp/vale-install/
+
+          # Move Vale binary to /usr/local/bin for global access
+          sudo mv /tmp/vale-install/vale /usr/local/bin/
+          sudo chmod +x /usr/local/bin/vale  # Make it executable
+
+      # Step 4: Configure Vale
       - name: Configure Vale
         run: |
-          echo "StylesPath = ../suse-styles" >> .vale.ini
+          # Remove default spelling file to avoid conflicts with SUSE style guide
+          rm -f suse-styles/common/Spelling.yml
+
+          # Create the main Vale configuration file
+          # Set StylesPath to the checked-out style guide
+          echo "StylesPath = $GITHUB_WORKSPACE/suse-styles" > .vale.ini
+
+          # Minimum alert level: 'warning' (ignore 'info' messages)
           echo "MinAlertLevel = warning" >> .vale.ini
           echo "" >> .vale.ini
+
+          # Configure rules for AsciiDoc files
           echo "[*.adoc]" >> .vale.ini
           echo "BasedOnStyles = common, asciidoc" >> .vale.ini
           echo "" >> .vale.ini
+
+          # Configure rules for Markdown files
           echo "[*.md]" >> .vale.ini
           echo "BasedOnStyles = common" >> .vale.ini
-        working-directory: 'main-repo'
+          echo "" >> .vale.ini
 
-      - name: Run Vale
-        uses: errata-ai/vale-action@v2
-        with:
-          files: 'main-repo/docs'
+          # Configure rules for plain text files
+          echo "[*.txt]" >> .vale.ini
+          echo "BasedOnStyles = common" >> .vale.ini
+
+      # Step 5: Run Vale and post/update PR comment
+      - name: Run Vale and Post/Update PR Comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Needed to post/update comments
+        run: |
+          set -e  # Exit on any error
+
+          cd "$GITHUB_WORKSPACE"  # Ensure we are in the repo root
+
+          # URL to the SUSE Style Guide documentation
+          STYLE_GUIDE_URL="https://documentation.suse.com/style/current/html/style-guide-adoc/index.html"
+
+          # Maximum number of issues to display in PR comment
+          MAX_ISSUES=50
+
+          echo "=== Fetching changed docs files ==="
+
+          # Get PR number and commit SHA from event payload
+          PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
+          COMMIT_SHA=$(jq -r .pull_request.head.sha < "$GITHUB_EVENT_PATH")
+
+          # API endpoint to fetch/post comments on this PR
+          COMMENTS_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
+
+          # Fetch only files changed in this PR that match docs patterns
+          CHANGED_FILES=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER/files" \
+            | jq -r '.[] | select(.filename | test("^docs/.*\\.(adoc|md|txt)$")) | .filename')
+
+          # If no relevant files were changed, skip linting
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No docs files changed in this PR. Skipping Vale linting."
+            exit 0
+          fi
+
+          echo "Changed files to lint:"
+          echo "$CHANGED_FILES"
+
+          echo "=== Running Vale ==="
+
+          # Run Vale on changed files, output JSON, do not exit on lint errors
+          VALE_OUTPUT=$(echo "$CHANGED_FILES" | xargs /usr/local/bin/vale --config="$GITHUB_WORKSPACE/.vale.ini" --output=JSON --no-exit || true)
+
+          # Save JSON output for further processing
+          echo "$VALE_OUTPUT" | jq '.' > vale_output.json
+
+          # Fetch all existing PR comments
+          COMMENTS_JSON=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$COMMENTS_URL")
+
+          # Function: find existing Vale comment for this commit
+          find_existing_comment() {
+            echo "$COMMENTS_JSON" | jq -r ".[] 
+              | select(.user.login==\"github-actions[bot]\") 
+              | select(.body | contains(\"Vale Linter Report — commit $COMMIT_SHA\") or contains(\"No Vale issues found — commit $COMMIT_SHA\")) 
+              | .id" | head -n 1
+          }
+
+          # Function: post a new comment or update an existing one
+          post_comment() {
+            local body="$1"
+            local id="$2"
+            if [ -n "$id" ]; then
+              # Update existing comment
+              curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
+                   -d "{\"body\": $body}" \
+                   "$COMMENTS_URL/$id" > /dev/null
+            else
+              # Post new comment
+              curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                   -X POST -d "{\"body\": $body}" "$COMMENTS_URL" > /dev/null
+            fi
+          }
+
+          # CASE 1: No Vale issues found
+          if ! echo "$VALE_OUTPUT" | grep -q '"Severity"'; then
+            COMMENT_BODY=$(jq -Rs . <<< "✅ No Vale issues found — great job following the [SUSE Style Guide]($STYLE_GUIDE_URL)! <!-- commit: $COMMIT_SHA --> <!-- Updated: $(date -u +"%Y-%m-%d %H:%M:%S UTC") -->")
+            COMMENT_ID=$(find_existing_comment)
+            post_comment "$COMMENT_BODY" "$COMMENT_ID"
+            echo "✅ Vale: No issues found on PR #$PR_NUMBER for commit $COMMIT_SHA"
+            exit 0
+          fi
+
+          # CASE 2: Vale issues found
+          ERRORS=$(jq '[.[][] | select(.Severity=="error")] | length' vale_output.json)
+          WARNINGS=$(jq '[.[][] | select(.Severity=="warning")] | length' vale_output.json)
+
+          # Start building markdown report
+          echo "### 📝 Vale Linter Report — commit $COMMIT_SHA — $(date -u +"%Y-%m-%d %H:%M UTC")" > vale_report.md
+          echo "" >> vale_report.md
+          echo "**Summary:** $ERRORS ❌ errors, $WARNINGS ⚠️ warnings" >> vale_report.md
+          echo "" >> vale_report.md
+          echo "<details>" >> vale_report.md
+          echo "<summary>Click to expand Vale issues (max $MAX_ISSUES)</summary>" >> vale_report.md
+          echo "" >> vale_report.md
+
+          # Table header
+          echo "| File | Line | Severity | Message | Suggestion | Rule | Rule Link |" >> vale_report.md
+          echo "|------|------|---------|--------|------------|------|-----------|" >> vale_report.md
+
+          # Add individual issues (limit to MAX_ISSUES)
+          jq -r --arg guide "$STYLE_GUIDE_URL" --argjson max "$MAX_ISSUES" '
+            to_entries[] as $file |
+            $file.value[] |
+            @base64
+          ' vale_output.json | head -n "$MAX_ISSUES" | while read -r line; do
+            _jq() { echo "$line" | base64 --decode | jq -r "$1"; }
+            FILE=$(_jq '. | .File // empty')
+            LINE=$(_jq '. | .Line // "-"')
+            SEVERITY=$(_jq 'if .Severity=="error" then "❌ error" elif .Severity=="warning" then "⚠️ warning" else .Severity end')
+            MESSAGE=$(_jq '.Message // "-"')
+            SUGGESTION=$(_jq '.Action.Params[0] // "-"')
+            RULE=$(_jq '.Check // "-"')
+            LINK="[link]($STYLE_GUIDE_URL#$(echo $RULE | tr '[:upper:]' '[:lower:]'))"
+
+            # Append issue row to markdown report
+            echo "| $FILE | $LINE | $SEVERITY | $MESSAGE | $SUGGESTION | $RULE | $LINK |" >> vale_report.md
+          done
+
+          # Close collapsible section
+          echo "" >> vale_report.md
+          echo "</details>" >> vale_report.md
+          echo "" >> vale_report.md
+          echo "For more details, see the [SUSE Style Guide]($STYLE_GUIDE_URL)." >> vale_report.md
+          echo "<!-- commit: $COMMIT_SHA -->" >> vale_report.md
+          echo "<!-- Updated: $(date -u +"%Y-%m-%d %H:%M:%S UTC") -->" >> vale_report.md
+
+          # Convert markdown to JSON string for GitHub API
+          COMMENT_BODY=$(jq -Rs . < vale_report.md)
+          COMMENT_ID=$(find_existing_comment)
+          post_comment "$COMMENT_BODY" "$COMMENT_ID"
+
+          echo "✅ Vale report posted/updated on PR #$PR_NUMBER for commit $COMMIT_SHA"
