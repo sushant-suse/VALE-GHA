@@ -72,10 +72,18 @@ jobs:
           cd "$GITHUB_WORKSPACE"
 
           STYLE_GUIDE_URL="https://documentation.suse.com/style/current/html/style-guide-adoc/index.html"
+          MAX_ISSUES=50
 
-          echo "=== Getting changed docs files ==="
+          echo "=== Fetching changed docs files ==="
+          PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
+          COMMIT_SHA=$(jq -r .pull_request.head.sha < "$GITHUB_EVENT_PATH")
+          COMMENTS_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
+
           # Get only files changed in the PR
-          CHANGED_FILES=$(jq -r '.pull_request.files[]?.filename // empty' < "$GITHUB_EVENT_PATH" | grep -E '^docs/.*\.(adoc|md|txt)$' || true)
+          CHANGED_FILES=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER/files" \
+            | jq -r '.[] | select(.filename | test("^docs/.*\\.(adoc|md|txt)$")) | .filename')
+
           if [ -z "$CHANGED_FILES" ]; then
             echo "No docs files changed in this PR. Skipping Vale linting."
             exit 0
@@ -85,18 +93,13 @@ jobs:
           echo "$CHANGED_FILES"
 
           echo "=== Running Vale ==="
-          # Run Vale only on changed files
           VALE_OUTPUT=$(echo "$CHANGED_FILES" | xargs /usr/local/bin/vale --config="$GITHUB_WORKSPACE/.vale.ini" --output=JSON --no-exit || true)
           echo "$VALE_OUTPUT" | jq '.' > vale_output.json
 
-          PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
-          COMMIT_SHA=$(jq -r .pull_request.head.sha < "$GITHUB_EVENT_PATH")
-          COMMENTS_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
-
-          # Fetch all PR comments once to avoid multiple API calls
+          # Fetch existing PR comments once
           COMMENTS_JSON=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$COMMENTS_URL")
 
-          # Function: find existing Vale comment for the current commit
+          # Function: find existing Vale comment for this commit
           find_existing_comment() {
             echo "$COMMENTS_JSON" | jq -r ".[] 
               | select(.user.login==\"github-actions[bot]\") 
@@ -136,23 +139,29 @@ jobs:
           echo "**Summary:** $ERRORS ❌ errors, $WARNINGS ⚠️ warnings" >> vale_report.md
           echo "" >> vale_report.md
           echo "<details>" >> vale_report.md
-          echo "<summary>Click to expand Vale issues</summary>" >> vale_report.md
+          echo "<summary>Click to expand Vale issues (max $MAX_ISSUES)</summary>" >> vale_report.md
           echo "" >> vale_report.md
 
-          # Table header with Rule Link
+          # Table header
           echo "| File | Line | Severity | Message | Suggestion | Rule | Rule Link |" >> vale_report.md
-          echo "|------|------|----------|---------|------------|------|-----------|" >> vale_report.md
+          echo "|------|------|---------|--------|------------|------|-----------|" >> vale_report.md
 
-          # Build table with proper jq string concatenation
-          jq -r --arg guide "$STYLE_GUIDE_URL" '
+          # Add issues with max limit
+          jq -r --arg guide "$STYLE_GUIDE_URL" --argjson max "$MAX_ISSUES" '
             to_entries[] as $file |
             $file.value[] |
-            "| \($file.key) | \(.Line) | " +
-            (if .Severity=="error" then "❌ error"
-             elif .Severity=="warning" then "⚠️ warning"
-             else .Severity end) +
-            " | \(.Message) | \(.Action.Params[0] // "-") | \(.Check) | [link](\($guide)#\(.Check | ascii_downcase)) |"
-          ' vale_output.json >> vale_report.md
+            @base64
+          ' vale_output.json | head -n "$MAX_ISSUES" | while read -r line; do
+            _jq() { echo "$line" | base64 --decode | jq -r "$1"; }
+            FILE=$(_jq '. | .File // empty')
+            LINE=$(_jq '. | .Line // "-"')
+            SEVERITY=$(_jq 'if .Severity=="error" then "❌ error" elif .Severity=="warning" then "⚠️ warning" else .Severity end')
+            MESSAGE=$(_jq '.Message // "-"')
+            SUGGESTION=$(_jq '.Action.Params[0] // "-"')
+            RULE=$(_jq '.Check // "-"')
+            LINK="[link]($STYLE_GUIDE_URL#$(echo $RULE | tr '[:upper:]' '[:lower:]'))"
+            echo "| $FILE | $LINE | $SEVERITY | $MESSAGE | $SUGGESTION | $RULE | $LINK |" >> vale_report.md
+          done
 
           echo "" >> vale_report.md
           echo "</details>" >> vale_report.md
