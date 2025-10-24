@@ -108,20 +108,39 @@ jobs:
           fi
 
           # CASE 2: Vale issues found
+
+          # Compute summary counts
+          ERRORS=$(jq '[.[][] | select(.Severity=="error")] | length' vale_output.json)
+          WARNINGS=$(jq '[.[][] | select(.Severity=="warning")] | length' vale_output.json)
+
           echo "### 📝 Vale Linter Report — commit $COMMIT_SHA — $(date -u +"%Y-%m-%d %H:%M UTC")" > vale_report.md
           echo "" >> vale_report.md
-          echo "| File | Line | Severity | Message | Suggestion | Rule |" >> vale_report.md
-          echo "|------|------|-----------|----------|-------------|------|" >> vale_report.md
+          echo "**Summary:** $ERRORS ❌ errors, $WARNINGS ⚠️ warnings" >> vale_report.md
+          echo "" >> vale_report.md
 
-          jq -r '
+          # Start collapsible block
+          echo "<details>" >> vale_report.md
+          echo "<summary>Click to expand Vale issues</summary>" >> vale_report.md
+          echo "" >> vale_report.md
+
+          # Table header with Rule Link
+          echo "| File | Line | Severity | Message | Suggestion | Rule | Rule Link |" >> vale_report.md
+          echo "|------|------|----------|---------|------------|------|-----------|" >> vale_report.md
+
+          # Group issues by file with link
+          jq -r --arg guide "$STYLE_GUIDE_URL" '
             to_entries[] as $file |
             $file.value[] |
             "| \($file.key) | \(.Line) | \(
-              if .Severity == "error" then "❌ error"
-              elif .Severity == "warning" then "⚠️ warning"
+              if .Severity == \"error\" then \"❌ error\"
+              elif .Severity == \"warning\" then \"⚠️ warning\"
               else .Severity end
-            ) | \(.Message) | \(.Action.Params[0] // "-") | \(.Check) |"
+            ) | \(.Message) | \(.Action.Params[0] // \"-\") | \(.Check) | [link](\($guide)#\(.Check | ascii_downcase)) |"
           ' vale_output.json >> vale_report.md
+
+          # Close collapsible
+          echo "" >> vale_report.md
+          echo "</details>" >> vale_report.md
 
           echo "" >> vale_report.md
           echo "For more details, see the [SUSE Style Guide]($STYLE_GUIDE_URL)." >> vale_report.md
