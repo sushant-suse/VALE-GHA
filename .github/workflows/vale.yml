@@ -43,7 +43,7 @@ jobs:
           REVIEW_URL="https://github.com/reviewdog/reviewdog/releases/download/v${REVIEW_VERSION}/reviewdog_${REVIEW_VERSION}_Linux_x86_64.tar.gz"
           curl -L "${REVIEW_URL}" | sudo tar -xz -C /usr/local/bin/
 
-      - name: Configure .vale.ini and Move Config
+      - name: Configure .vale.ini
         run: |
           # CRITICAL FIX: The spelling rule needs the 'config' folder for dictionaries. Copy it to the root.
           cp -r suse-styles/config .
@@ -52,10 +52,10 @@ jobs:
           cat <<EOF > .vale.ini
           StylesPath = suse-styles
           MinAlertLevel = warning
-                    
+                              
           [*.adoc]
           BasedOnStyles = common, asciidoc
-                    
+                              
           [*.md]
           BasedOnStyles = common
 
@@ -72,11 +72,12 @@ jobs:
           # Execute Vale and store output
           VALE_OUTPUT=$(/usr/local/bin/vale --output=JSON --no-exit docs)
           
-          # Use grep to quickly check if the output contains any results object
-          if echo "$VALE_OUTPUT" | grep -q '"Results":\['; then
+          # Check for presence of the 'Results' key with at least one opening brace
+          # This is the most reliable check for valid JSON output with results
+          if echo "$VALE_OUTPUT" | grep -q '"Results":\[{'; then
               echo "Vale found issues. Sending results to Reviewdog..."
               
-              # Pipe to jq for resilient parsing and formatting for RDJSONL
+              # CRITICAL: Pipe to jq for resilient parsing and formatting for RDJSONL
               echo "$VALE_OUTPUT" \
               | jq -c '.Results[] | {
                   message: .Message, 
