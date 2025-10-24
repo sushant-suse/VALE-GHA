@@ -12,21 +12,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Checkout your main repository
       - name: Checkout Docs Repository (Main Repo)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # Step 2: Checkout SUSE Vale Style Guide
       - name: Checkout SUSE Style Guide
         uses: actions/checkout@v4
         with:
           repository: 'openSUSE/suse-vale-styleguide'
           path: 'suse-styles'
 
-      # Step 3: Install Dependencies
-      - name: Install Vale, Reviewdog, and Asciidoctor
+      - name: Install Vale, jq, and Asciidoctor
         run: |
           sudo apt-get update
           sudo apt-get install -y asciidoctor jq curl tar
@@ -39,12 +36,6 @@ jobs:
           sudo mv /tmp/vale-install/vale /usr/local/bin/
           sudo chmod +x /usr/local/bin/vale
 
-          # Install Reviewdog
-          REVIEW_VERSION="0.17.0"
-          REVIEW_URL="https://github.com/reviewdog/reviewdog/releases/download/v${REVIEW_VERSION}/reviewdog_${REVIEW_VERSION}_Linux_x86_64.tar.gz"
-          curl -L "$REVIEW_URL" | sudo tar -xz -C /usr/local/bin/
-
-      # Step 4: Configure .vale.ini
       - name: Configure Vale
         run: |
           rm -f suse-styles/common/Spelling.yml
@@ -60,48 +51,46 @@ jobs:
           echo "" >> .vale.ini
           echo "[*.txt]" >> .vale.ini
           echo "BasedOnStyles = common" >> .vale.ini
-        env:
-          GITHUB_WORKSPACE: ${{ github.workspace }}
 
-      # Step 5: Run Vale and Report
-      - name: Run Vale and Report to GitHub PR
+      - name: Run Vale and Post Results to PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           cd "$GITHUB_WORKSPACE"
 
-          echo "=== Directory structure ==="
-          ls -R docs || echo "⚠️ No docs folder found!"
-
-          echo "=== Vale configuration ==="
-          /usr/local/bin/vale ls-config --config="$GITHUB_WORKSPACE/.vale.ini" || echo "⚠️ Vale config issue!"
-
           echo "=== Running Vale ==="
           VALE_OUTPUT=$(/usr/local/bin/vale --config="$GITHUB_WORKSPACE/.vale.ini" --output=JSON --no-exit docs || true)
 
-          echo "Raw JSON output from Vale:"
-          echo "$VALE_OUTPUT" | jq '.' || echo "$VALE_OUTPUT"
+          echo "$VALE_OUTPUT" | jq '.' > vale_output.json
 
-          if echo "$VALE_OUTPUT" | grep -q '"Results":\['; then
-            echo "Vale found issues. Sending results to Reviewdog..."
-            echo "$VALE_OUTPUT" | jq -c '.Results[] | {
-                message: .Message,
-                location: {
-                    path: .Location.Path,
-                    range: {
-                        start: {line: .Location.Span.Start.Line, column: .Location.Span.Start.Column},
-                        end: {line: .Location.Span.End.Line, column: .Location.Span.End.Column}
-                    }
-                },
-                severity: .Level
-            }' | /usr/local/bin/reviewdog -f=rdjsonl \
-                  -name="Vale Linter" \
-                  -reporter=github-pr-review \
-                  -level=warning \
-                  -filter-mode=added
-          else
-            echo "✅ Vale found no issues (or config problem)."
+          # Check if we have any results
+          if ! echo "$VALE_OUTPUT" | grep -q '"Severity"'; then
+            echo "✅ No Vale issues found."
+            exit 0
           fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+          # Build Markdown table
+          echo "### 📝 Vale Linter Report" > vale_report.md
+          echo "" >> vale_report.md
+          echo "| File | Line | Severity | Message | Suggestion | Rule |" >> vale_report.md
+          echo "|------|------|-----------|----------|-------------|------|" >> vale_report.md
+
+          jq -r '
+            to_entries[] as $file |
+            $file.value[] |
+            "| \($file.key) | \(.Line) | \(.Severity) | \(.Message) | \(.Action.Params[0] // "-") | \(.Check) |"
+          ' vale_output.json >> vale_report.md
+
+          echo "" >> vale_report.md
+          echo "For more details, see the [SUSE Style Guide](https://documentation.suse.com/style/current/html/docu_styleguide/)." >> vale_report.md
+
+          echo "Generated Vale Report:"
+          cat vale_report.md
+
+          # Post comment to PR using GitHub API
+          COMMENT_BODY=$(jq -Rs . < vale_report.md)
+          curl -s -H "Authorization: token $GITHUB_TOKEN" \
+               -X POST \
+               -d "{\"body\": $COMMENT_BODY}" \
+               "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${{ github.event.pull_request.number }}/comments"
