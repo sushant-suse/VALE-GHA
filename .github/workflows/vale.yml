@@ -2,6 +2,7 @@ name: Vale Linting
 
 on:
   pull_request:
+    # Only lint docs files
     paths:
       - 'docs/**/*.adoc'
       - 'docs/**/*.md'
@@ -17,17 +18,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Step 1: Checkout the repository
       - name: Checkout Docs Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # Step 2: Checkout SUSE Vale Style Guide
       - name: Checkout SUSE Style Guide
         uses: actions/checkout@v4
         with:
           repository: 'openSUSE/suse-vale-styleguide'
           path: 'suse-styles'
 
+      # Step 3: Install dependencies
       - name: Install Vale, jq, and Asciidoctor
         run: |
           sudo apt-get update
@@ -40,10 +44,13 @@ jobs:
           sudo mv /tmp/vale-install/vale /usr/local/bin/
           sudo chmod +x /usr/local/bin/vale
 
+      # Step 4: Configure Vale
       - name: Configure Vale
         run: |
+          # Remove default spelling file to avoid conflicts
           rm -f suse-styles/common/Spelling.yml
 
+          # Create Vale config
           echo "StylesPath = $GITHUB_WORKSPACE/suse-styles" > .vale.ini
           echo "MinAlertLevel = warning" >> .vale.ini
           echo "" >> .vale.ini
@@ -56,6 +63,7 @@ jobs:
           echo "[*.txt]" >> .vale.ini
           echo "BasedOnStyles = common" >> .vale.ini
 
+      # Step 5: Run Vale on changed files and post/update PR comment
       - name: Run Vale and Post/Update PR Comment
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -63,18 +71,32 @@ jobs:
           set -e
           cd "$GITHUB_WORKSPACE"
 
+          STYLE_GUIDE_URL="https://documentation.suse.com/style/current/html/style-guide-adoc/index.html"
+
+          echo "=== Getting changed docs files ==="
+          # Get only files changed in the PR
+          CHANGED_FILES=$(jq -r '.pull_request.files[]?.filename // empty' < "$GITHUB_EVENT_PATH" | grep -E '^docs/.*\.(adoc|md|txt)$' || true)
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No docs files changed in this PR. Skipping Vale linting."
+            exit 0
+          fi
+
+          echo "Changed files to lint:"
+          echo "$CHANGED_FILES"
+
           echo "=== Running Vale ==="
-          VALE_OUTPUT=$(/usr/local/bin/vale --config="$GITHUB_WORKSPACE/.vale.ini" --output=JSON --no-exit docs || true)
+          # Run Vale only on changed files
+          VALE_OUTPUT=$(echo "$CHANGED_FILES" | xargs /usr/local/bin/vale --config="$GITHUB_WORKSPACE/.vale.ini" --output=JSON --no-exit || true)
           echo "$VALE_OUTPUT" | jq '.' > vale_output.json
 
           PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
           COMMIT_SHA=$(jq -r .pull_request.head.sha < "$GITHUB_EVENT_PATH")
           COMMENTS_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
 
-          # Fetch comments once
+          # Fetch all PR comments once to avoid multiple API calls
           COMMENTS_JSON=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$COMMENTS_URL")
 
-          # Find existing Vale comment for this commit
+          # Function: find existing Vale comment for the current commit
           find_existing_comment() {
             echo "$COMMENTS_JSON" | jq -r ".[] 
               | select(.user.login==\"github-actions[bot]\") 
@@ -82,7 +104,7 @@ jobs:
               | .id" | head -n 1
           }
 
-          # Function to create/update comment
+          # Function: post or update comment
           post_comment() {
             local body="$1"
             local id="$2"
@@ -96,8 +118,6 @@ jobs:
             fi
           }
 
-          STYLE_GUIDE_URL="https://documentation.suse.com/style/current/html/style-guide-adoc/index.html"
-
           # CASE 1: No Vale issues
           if ! echo "$VALE_OUTPUT" | grep -q '"Severity"'; then
             COMMENT_BODY=$(jq -Rs . <<< "✅ No Vale issues found — great job following the [SUSE Style Guide]($STYLE_GUIDE_URL)! <!-- commit: $COMMIT_SHA --> <!-- Updated: $(date -u +"%Y-%m-%d %H:%M:%S UTC") -->")
@@ -108,8 +128,6 @@ jobs:
           fi
 
           # CASE 2: Vale issues found
-
-          # Compute summary counts
           ERRORS=$(jq '[.[][] | select(.Severity=="error")] | length' vale_output.json)
           WARNINGS=$(jq '[.[][] | select(.Severity=="warning")] | length' vale_output.json)
 
@@ -117,8 +135,6 @@ jobs:
           echo "" >> vale_report.md
           echo "**Summary:** $ERRORS ❌ errors, $WARNINGS ⚠️ warnings" >> vale_report.md
           echo "" >> vale_report.md
-
-          # Start collapsible block
           echo "<details>" >> vale_report.md
           echo "<summary>Click to expand Vale issues</summary>" >> vale_report.md
           echo "" >> vale_report.md
@@ -127,21 +143,19 @@ jobs:
           echo "| File | Line | Severity | Message | Suggestion | Rule | Rule Link |" >> vale_report.md
           echo "|------|------|----------|---------|------------|------|-----------|" >> vale_report.md
 
-          # Group issues by file with link
+          # Build table with proper jq string concatenation
           jq -r --arg guide "$STYLE_GUIDE_URL" '
             to_entries[] as $file |
             $file.value[] |
-            "| \($file.key) | \(.Line) | \(
-              if .Severity == \"error\" then \"❌ error\"
-              elif .Severity == \"warning\" then \"⚠️ warning\"
-              else .Severity end
-            ) | \(.Message) | \(.Action.Params[0] // \"-\") | \(.Check) | [link](\($guide)#\(.Check | ascii_downcase)) |"
+            "| \($file.key) | \(.Line) | " +
+            (if .Severity=="error" then "❌ error"
+             elif .Severity=="warning" then "⚠️ warning"
+             else .Severity end) +
+            " | \(.Message) | \(.Action.Params[0] // "-") | \(.Check) | [link](\($guide)#\(.Check | ascii_downcase)) |"
           ' vale_output.json >> vale_report.md
 
-          # Close collapsible
           echo "" >> vale_report.md
           echo "</details>" >> vale_report.md
-
           echo "" >> vale_report.md
           echo "For more details, see the [SUSE Style Guide]($STYLE_GUIDE_URL)." >> vale_report.md
           echo "<!-- commit: $COMMIT_SHA -->" >> vale_report.md
