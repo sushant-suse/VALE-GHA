@@ -7,6 +7,7 @@ on:
       - 'docs/**/*.md'
       - 'docs/**/*.txt'
 
+# Permissions required for commenting on PRs
 permissions:
   contents: read
   pull-requests: write
@@ -17,23 +18,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1️⃣ Checkout the main repository (the one being linted)
       - name: Checkout Docs Repository (Main Repo)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # 2️⃣ Checkout the SUSE Vale style guide rules
       - name: Checkout SUSE Style Guide
         uses: actions/checkout@v4
         with:
           repository: 'openSUSE/suse-vale-styleguide'
           path: 'suse-styles'
 
+      # 3️⃣ Install Vale, jq, and Asciidoctor
       - name: Install Vale, jq, and Asciidoctor
         run: |
           sudo apt-get update
           sudo apt-get install -y asciidoctor jq curl tar
-
-          # Install Vale
           VALE_VERSION="3.12.0"
           VALE_URL="https://github.com/errata-ai/vale/releases/download/v${VALE_VERSION}/vale_${VALE_VERSION}_Linux_64-bit.tar.gz"
           mkdir -p /tmp/vale-install
@@ -41,8 +43,10 @@ jobs:
           sudo mv /tmp/vale-install/vale /usr/local/bin/
           sudo chmod +x /usr/local/bin/vale
 
+      # 4️⃣ Configure Vale with SUSE rules
       - name: Configure Vale
         run: |
+          # Remove problematic spelling rule to avoid dictionary conflicts
           rm -f suse-styles/common/Spelling.yml
 
           echo "StylesPath = $GITHUB_WORKSPACE/suse-styles" > .vale.ini
@@ -57,6 +61,7 @@ jobs:
           echo "[*.txt]" >> .vale.ini
           echo "BasedOnStyles = common" >> .vale.ini
 
+      # 5️⃣ Run Vale, generate Markdown report, and post or update a PR comment
       - name: Run Vale and Post Results to PR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -66,36 +71,71 @@ jobs:
 
           echo "=== Running Vale ==="
           VALE_OUTPUT=$(/usr/local/bin/vale --config="$GITHUB_WORKSPACE/.vale.ini" --output=JSON --no-exit docs || true)
-
           echo "$VALE_OUTPUT" | jq '.' > vale_output.json
 
-          # Check if we have any results
+          PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
+          COMMENTS_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
+
+          # Function: find an existing Vale report comment to update
+          find_existing_comment() {
+            curl -s -H "Authorization: token $GITHUB_TOKEN" "$COMMENTS_URL" \
+              | jq -r '.[] | select(.user.login=="github-actions[bot]") | select(.body|test("### 📝 Vale Linter Report|✅ No Vale issues found")) | .id' | head -n 1
+          }
+
+          # 🟢 CASE 1: No Vale issues found
           if ! echo "$VALE_OUTPUT" | grep -q '"Severity"'; then
             echo "✅ No Vale issues found."
+            COMMENT_BODY=$(jq -Rs . <<< "✅ No Vale issues found — great job following the [SUSE Style Guide](https://documentation.suse.com/style/current/html/style-guide-adoc/index.html)!")
+
+            COMMENT_ID=$(find_existing_comment)
+            if [ -n "$COMMENT_ID" ]; then
+              echo "🪄 Updating existing Vale comment (#$COMMENT_ID)"
+              curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
+                   -d "{\"body\": $COMMENT_BODY}" \
+                   "$COMMENTS_URL/$COMMENT_ID" > /dev/null
+            else
+              echo "💬 Creating new 'no issues' comment"
+              curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                   -X POST -d "{\"body\": $COMMENT_BODY}" "$COMMENTS_URL" > /dev/null
+            fi
             exit 0
           fi
 
-          # Build Markdown table
+          # 🟡 CASE 2: Vale found issues — build report
           echo "### 📝 Vale Linter Report" > vale_report.md
           echo "" >> vale_report.md
           echo "| File | Line | Severity | Message | Suggestion | Rule |" >> vale_report.md
           echo "|------|------|-----------|----------|-------------|------|" >> vale_report.md
 
+          # Add findings to table, with icons for severity
           jq -r '
             to_entries[] as $file |
             $file.value[] |
-            "| \($file.key) | \(.Line) | \(.Severity) | \(.Message) | \(.Action.Params[0] // "-") | \(.Check) |"
+            "| \($file.key) | \(.Line) | \(
+              if .Severity == "error" then "❌ error"
+              elif .Severity == "warning" then "⚠️ warning"
+              else .Severity end
+            ) | \(.Message) | \(.Action.Params[0] // "-") | \(.Check) |"
           ' vale_output.json >> vale_report.md
 
           echo "" >> vale_report.md
-          echo "For more details, see the [SUSE Style Guide](https://documentation.suse.com/style/current/html/docu_styleguide/)." >> vale_report.md
+          echo "For more details, see the [SUSE Style Guide](https://documentation.suse.com/style/current/html/style-guide-adoc/index.html)." >> vale_report.md
 
           echo "Generated Vale Report:"
           cat vale_report.md
 
-          # Post comment to PR using GitHub API
           COMMENT_BODY=$(jq -Rs . < vale_report.md)
-          curl -s -H "Authorization: token $GITHUB_TOKEN" \
-               -X POST \
-               -d "{\"body\": $COMMENT_BODY}" \
-               "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${{ github.event.pull_request.number }}/comments"
+          COMMENT_ID=$(find_existing_comment)
+
+          if [ -n "$COMMENT_ID" ]; then
+            echo "🪄 Updating existing Vale report comment (#$COMMENT_ID)"
+            curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
+                 -d "{\"body\": $COMMENT_BODY}" \
+                 "$COMMENTS_URL/$COMMENT_ID" > /dev/null
+          else
+            echo "💬 Creating new Vale report comment"
+            curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                 -X POST -d "{\"body\": $COMMENT_BODY}" "$COMMENTS_URL" > /dev/null
+          fi
+
+          echo "✅ Vale report posted/updated on PR #$PR_NUMBER"
