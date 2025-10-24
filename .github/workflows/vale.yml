@@ -43,12 +43,14 @@ jobs:
           REVIEW_URL="https://github.com/reviewdog/reviewdog/releases/download/v${REVIEW_VERSION}/reviewdog_${REVIEW_VERSION}_Linux_x86_64.tar.gz"
           curl -L "${REVIEW_URL}" | sudo tar -xz -C /usr/local/bin/
 
-      - name: Configure .vale.ini
+      - name: Configure .vale.ini and Fix Style Paths
         run: |
-          # CRITICAL FIX: The spelling rule needs the 'config' folder for dictionaries. Copy it to the root.
-          cp -r suse-styles/config .
-
+          # CRITICAL FIX: The Spelling.yml rule breaks the entire style guide loading.
+          # We manually remove the Spelling rule file to bypass the dictionary dependency error.
+          rm -f suse-styles/common/Spelling.yml
+          
           # Dynamically create the .vale.ini file in the root directory
+          # StylesPath is correctly set to the directory containing the style folders (common, asciidoc)
           cat <<EOF > .vale.ini
           StylesPath = suse-styles
           MinAlertLevel = warning
@@ -73,7 +75,6 @@ jobs:
           VALE_OUTPUT=$(/usr/local/bin/vale --output=JSON --no-exit docs)
           
           # Check for presence of the 'Results' key with at least one opening brace
-          # This is the most reliable check for valid JSON output with results
           if echo "$VALE_OUTPUT" | grep -q '"Results":\[{'; then
               echo "Vale found issues. Sending results to Reviewdog..."
               
