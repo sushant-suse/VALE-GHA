@@ -49,7 +49,7 @@ jobs:
           # Fix: Manually remove the problematic Spelling rule to bypass the dictionary dependency conflict.
           rm -f suse-styles/common/Spelling.yml
 
-          # CRITICAL FIX: The lines inside the cat block must be absolutely flush to prevent path-breaking whitespace.
+          # 1. Create the file with leading spaces (as is necessary for YAML indentation)
           cat <<EOF > .vale.ini
           StylesPath = ${GITHUB_WORKSPACE}/suse-styles
           MinAlertLevel = warning
@@ -60,6 +60,11 @@ jobs:
           [*.txt]
           BasedOnStyles = common
           EOF
+
+          # 2. CRITICAL FIX: Use sed to strip leading whitespace from the generated .vale.ini file
+          # This guarantees a valid INI file format.
+          sed -i 's/^[ \t]*//' .vale.ini
+
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
