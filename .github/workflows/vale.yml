@@ -132,4 +132,4 @@ jobs:
                 -X POST -d "{\"body\": $COMMENT_BODY}" "$COMMENTS_URL" > /dev/null
           fi
 
-          echo "✅ Vale report posted/updated on PR #$PR_NUMBER for commit $COMMIT_SHA"
+          echo "Working fine:✅ Vale report posted/updated on PR #$PR_NUMBER for commit $COMMIT_SHA"
