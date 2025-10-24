@@ -25,14 +25,32 @@ jobs:
 
       - name: Install Dependencies (Vale, Reviewdog, and Asciidoctor)
         run: |
-          # ... (installation commands are unchanged)
+          # Update and install Asciidoctor (for ADOC parsing) and jq
+          sudo apt-get update
+          sudo apt-get install -y asciidoctor jq
+
+          # Install Vale (CRITICAL FIX for Exit Code 127)
+          VALE_VERSION="3.12.0" 
+          VALE_URL="https://github.com/errata-ai/vale/releases/download/v${VALE_VERSION}/vale_${VALE_VERSION}_Linux_64-bit.tar.gz"
+          
+          # Explicitly install binary with sudo
+          mkdir -p /tmp/vale-install
+          curl -L "${VALE_URL}" | tar -xz -C /tmp/vale-install/
+          sudo mv /tmp/vale-install/vale /usr/local/bin/
+          sudo chmod +x /usr/local/bin/vale
+
+          # Install Reviewdog (for PR annotations)
+          REVIEW_VERSION="0.17.0"
+          REVIEW_URL="https://github.com/reviewdog/reviewdog/releases/download/v${REVIEW_VERSION}/reviewdog_${REVIEW_VERSION}_Linux_x86_64.tar.gz"
+          curl -L "${REVIEW_URL}" | sudo tar -xz -C /usr/local/bin/
 
       - name: Configure .vale.ini
         run: |
-          # Fix: Remove the problematic spelling rule to bypass the dictionary dependency
+          # FIX: Manually remove the problematic Spelling rule to bypass the dictionary dependency conflict.
           rm -f suse-styles/common/Spelling.yml
-
-          # Set StylesPath using the absolute GITHUB_WORKSPACE variable
+          
+          # Dynamically create the .vale.ini file in the root directory
+          # StylesPath is set to the absolute path using GITHUB_WORKSPACE for maximum stability.
           cat <<EOF > .vale.ini
           StylesPath = ${GITHUB_WORKSPACE}/suse-styles # ABSOLUTE PATH FIX
           MinAlertLevel = warning
@@ -47,11 +65,14 @@ jobs:
           BasedOnStyles = common
           EOF
         env:
-          # Make sure GITHUB_WORKSPACE is available for the shell script
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
       - name: Run Vale and Report to GitHub PR (Script Method)
         run: |
+          # Create and run a temporary shell script to handle the complex jq logic safely.
+          cat <<'END_SCRIPT' > run_vale.sh
+          #!/bin/bash
+          
           # Execute Vale and store output
           VALE_OUTPUT=$(/usr/local/bin/vale --output=JSON --no-exit docs)
           
@@ -81,8 +102,13 @@ jobs:
           else
               echo "Vale found no issues. Skipping reviewdog reporting."
           fi
+          
+          END_SCRIPT
+          
+          # Make the script executable and run it
+          chmod +x run_vale.sh
+          ./run_vale.sh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Pass the absolute path down to the script
           GITHUB_WORKSPACE: ${{ github.workspace }}
