@@ -71,14 +71,29 @@ jobs:
           COMMIT_SHA=$(jq -r .pull_request.head.sha < "$GITHUB_EVENT_PATH")
           COMMENTS_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
 
+          # Fetch comments once
+          COMMENTS_JSON=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$COMMENTS_URL")
+
           # Find existing Vale comment for this commit
           find_existing_comment() {
-            curl -s -H "Authorization: token $GITHUB_TOKEN" "$COMMENTS_URL" \
-              | jq -r ".[] 
-                  | select(.user.login==\"github-actions[bot]\") 
-                  | select(.body | contains(\"Vale Linter Report — commit $COMMIT_SHA\") or contains(\"No Vale issues found — commit $COMMIT_SHA\")) 
-                  | .id" \
-              | head -n 1
+            echo "$COMMENTS_JSON" | jq -r ".[] 
+              | select(.user.login==\"github-actions[bot]\") 
+              | select(.body | contains(\"Vale Linter Report — commit $COMMIT_SHA\") or contains(\"No Vale issues found — commit $COMMIT_SHA\")) 
+              | .id" | head -n 1
+          }
+
+          # Function to create/update comment
+          post_comment() {
+            local body="$1"
+            local id="$2"
+            if [ -n "$id" ]; then
+              curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
+                   -d "{\"body\": $body}" \
+                   "$COMMENTS_URL/$id" > /dev/null
+            else
+              curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                   -X POST -d "{\"body\": $body}" "$COMMENTS_URL" > /dev/null
+            fi
           }
 
           STYLE_GUIDE_URL="https://documentation.suse.com/style/current/html/style-guide-adoc/index.html"
@@ -87,20 +102,13 @@ jobs:
           if ! echo "$VALE_OUTPUT" | grep -q '"Severity"'; then
             COMMENT_BODY=$(jq -Rs . <<< "✅ No Vale issues found — great job following the [SUSE Style Guide]($STYLE_GUIDE_URL)! <!-- commit: $COMMIT_SHA --> <!-- Updated: $(date -u +"%Y-%m-%d %H:%M:%S UTC") -->")
             COMMENT_ID=$(find_existing_comment)
-
-            if [ -n "$COMMENT_ID" ]; then
-              curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
-                  -d "{\"body\": $COMMENT_BODY}" \
-                  "$COMMENTS_URL/$COMMENT_ID" > /dev/null
-            else
-              curl -s -H "Authorization: token $GITHUB_TOKEN" \
-                  -X POST -d "{\"body\": $COMMENT_BODY}" "$COMMENTS_URL" > /dev/null
-            fi
+            post_comment "$COMMENT_BODY" "$COMMENT_ID"
+            echo "✅ Vale: No issues found on PR #$PR_NUMBER for commit $COMMIT_SHA"
             exit 0
           fi
 
           # CASE 2: Vale issues found
-          echo "### 📝 Vale Linter Report — commit $COMMIT_SHA" > vale_report.md
+          echo "### 📝 Vale Linter Report — commit $COMMIT_SHA — $(date -u +"%Y-%m-%d %H:%M UTC")" > vale_report.md
           echo "" >> vale_report.md
           echo "| File | Line | Severity | Message | Suggestion | Rule |" >> vale_report.md
           echo "|------|------|-----------|----------|-------------|------|" >> vale_report.md
@@ -122,14 +130,6 @@ jobs:
 
           COMMENT_BODY=$(jq -Rs . < vale_report.md)
           COMMENT_ID=$(find_existing_comment)
+          post_comment "$COMMENT_BODY" "$COMMENT_ID"
 
-          if [ -n "$COMMENT_ID" ]; then
-            curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
-                -d "{\"body\": $COMMENT_BODY}" \
-                "$COMMENTS_URL/$COMMENT_ID" > /dev/null
-          else
-            curl -s -H "Authorization: token $GITHUB_TOKEN" \
-                -X POST -d "{\"body\": $COMMENT_BODY}" "$COMMENTS_URL" > /dev/null
-          fi
-
-          echo "Working fine:✅ Vale report posted/updated on PR #$PR_NUMBER for commit $COMMIT_SHA"
+          echo "✅ Vale report posted/updated on PR #$PR_NUMBER for commit $COMMIT_SHA"
