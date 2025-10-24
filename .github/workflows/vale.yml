@@ -46,13 +46,12 @@ jobs:
 
       - name: Configure .vale.ini
         run: |
-          # FIX: Manually remove the problematic Spelling rule to bypass the dictionary dependency conflict.
+          # Fix: Manually remove the problematic Spelling rule to bypass the dictionary dependency conflict.
           rm -f suse-styles/common/Spelling.yml
-          
-          # Dynamically create the .vale.ini file in the root directory
-          # StylesPath is set to the absolute path using GITHUB_WORKSPACE for maximum stability.
+
+          # CRITICAL FIX: Removed single quotes from 'EOF' to force shell interpolation of the variable.
           cat <<EOF > .vale.ini
-          StylesPath = ${GITHUB_WORKSPACE}/suse-styles # ABSOLUTE PATH FIX
+          StylesPath = ${GITHUB_WORKSPACE}/suse-styles # The variable will now be expanded to the absolute path
           MinAlertLevel = warning
                               
           [*.adoc]
