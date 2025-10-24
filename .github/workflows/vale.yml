@@ -33,7 +33,6 @@ jobs:
           VALE_VERSION="3.12.0" 
           VALE_URL="https://github.com/errata-ai/vale/releases/download/v${VALE_VERSION}/vale_${VALE_VERSION}_Linux_64-bit.tar.gz"
           
-          # Use a temporary directory for safe extraction and global move
           mkdir -p /tmp/vale-install
           curl -L "${VALE_URL}" | tar -xz -C /tmp/vale-install/
           sudo mv /tmp/vale-install/vale /usr/local/bin/
@@ -44,9 +43,9 @@ jobs:
           REVIEW_URL="https://github.com/reviewdog/reviewdog/releases/download/v${REVIEW_VERSION}/reviewdog_${REVIEW_VERSION}_Linux_x86_64.tar.gz"
           curl -L "${REVIEW_URL}" | sudo tar -xz -C /usr/local/bin/
 
-      - name: Configure .vale.ini
+      - name: Configure .vale.ini and Move Config
         run: |
-          # The spelling rule needs the 'config' folder for dictionaries. Copy it to the root.
+          # CRITICAL FIX: The spelling rule needs the 'config' folder for dictionaries. Copy it to the root.
           cp -r suse-styles/config .
 
           # Dynamically create the .vale.ini file in the root directory
@@ -64,27 +63,22 @@ jobs:
           BasedOnStyles = common
           EOF
 
-      - name: Run Vale and Report to GitHub PR
+      - name: Run Vale and Report to GitHub PR (Script Method)
         run: |
-          # Ditch vale sync as it's unnecessary and problematic
+          # Create and run a temporary shell script to handle the complex jq logic safely.
+          cat <<'END_SCRIPT' > run_vale.sh
+          #!/bin/bash
           
-          # Execute Vale and store output in a variable
+          # Execute Vale and store output
           VALE_OUTPUT=$(/usr/local/bin/vale --output=JSON --no-exit docs)
           
-          # CRITICAL FIX: Use a robust jq filter that works regardless of the Vale version's JSON structure.
-          # We check if the JSON is an array (old version) or an object with a 'Results' key (new version).
-          # Then, we filter the results and pipe them to reviewdog.
-          
-          # Filter the results to get a stream of valid RDJSONL objects
-          VALID_OUTPUT=$(echo "$VALE_OUTPUT" | jq -c '
-              # If the top level is an object and has a Results array (new Vale), use that
-              if type == "object" and .Results? then .Results[]
-              # If the top level is an array (old Vale), use the array directly
-              elif type == "array" then .[]
-              # Otherwise, output nothing
-              else empty
-              end 
-              | {
+          # Use grep to quickly check if the output contains any results object
+          if echo "$VALE_OUTPUT" | grep -q '"Results":\['; then
+              echo "Vale found issues. Sending results to Reviewdog..."
+              
+              # Pipe to jq for resilient parsing and formatting for RDJSONL
+              echo "$VALE_OUTPUT" \
+              | jq -c '.Results[] | {
                   message: .Message, 
                   location: {
                       path: .Location.Path, 
@@ -94,24 +88,22 @@ jobs:
                       }
                   }, 
                   severity: .Level
-              } 
-              | select(.severity) # Filter out any null results
-          ')
-          
-          # CRITICAL FIX: Check if the VALID_OUTPUT variable is NOT empty before running reviewdog
-          if [ -n "$VALID_OUTPUT" ]; then
-            echo "Vale found issues. Sending results to Reviewdog..."
-            
-            echo "$VALID_OUTPUT" \
-            | /usr/local/bin/reviewdog -f=rdjsonl \
-              -name="Vale Linter" \
-              -reporter=github-pr-review \
-              -level=warning \
-              -filter-mode=added \
-              -fail-on-error: true
+              }' \
+              | /usr/local/bin/reviewdog -f=rdjsonl \
+                  -name="Vale Linter" \
+                  -reporter=github-pr-review \
+                  -level=warning \
+                  -filter-mode=added \
+                  -fail-on-error: true
           else
-            echo "Vale found no issues. Skipping reviewdog reporting."
+              echo "Vale found no issues. Skipping reviewdog reporting."
           fi
+          
+          END_SCRIPT
+          
+          # Make the script executable and run it
+          chmod +x run_vale.sh
+          ./run_vale.sh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
