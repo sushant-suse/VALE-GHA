@@ -120,7 +120,8 @@ jobs:
           GITHUB_REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
 
           # Use git diff to find file paths modified between the PR's base and head commits.
-          # Filter to exclude deleted files (--diff-filter=d) and match documentation extensions.
+          # --diff-filter=d: Excludes deleted files (only lint changes/additions).
+          # grep -E '\.(adoc|md|txt)$': Filters for the documentation file extensions.
           CHANGED_FILES=$(git diff --name-only --diff-filter=d "$BASE_SHA" "$COMMIT_SHA" \
             | grep -E '\.(adoc|md|txt)$' || true) # || true prevents script exit if no files are found
 
@@ -137,7 +138,7 @@ jobs:
 
           # Execute Vale on the list of changed files.
           # --output=JSON: Ensures machine-readable JSON output.
-          # --no-exit: Ensures the script continues even if linting errors are found.
+          # --no-exit: Ensures the script continues even if linting errors are found (we handle errors via exit code later).
           VALE_OUTPUT=$(echo "$CHANGED_FILES" | xargs /usr/local/bin/vale --config="$GITHUB_WORKSPACE/.vale.ini" --output=JSON --no-exit || true)
 
           # Save the raw JSON output to a file for structured parsing.
@@ -147,13 +148,13 @@ jobs:
           COMMENTS_JSON=$(curl -s -H "Authorization: token $GITHUB_TOKEN_VAR" "$COMMENTS_URL")
 
           # Function: Find the ID of the existing Vale Linter report comment.
-          # Removed the $COMMIT_SHA check. This ensures the action finds and 
-          # updates the SINGLE existing Vale report comment, rather than posting a new one for every commit.
+          # Search for the generic report title or success message, 
+          # ignoring the commit SHA. This ensures the action UPDATES the existing comment.
           find_existing_comment() {
             echo "$COMMENTS_JSON" | jq -r ".[] 
               | select(.user.login==\"github-actions[bot]\") 
-              | select(.body | contains(\"Vale Linter Report\")) # Search for the generic title header
-              | .id" | head -n 1 # Get the ID of the first match
+              | select(.body | contains(\"Vale Linter Report\") or contains(\"No Vale issues found\")) 
+              | .id" | head -n 1 # Get the ID of the first match found
           }
 
           # Function: Post a new comment or update an existing one (PATCH vs. POST request).
@@ -175,12 +176,13 @@ jobs:
           # --- CASE 1: No Vale issues found ---
           # Check if the JSON output contains any "Severity" key (the marker for an issue).
           if ! echo "$VALE_OUTPUT" | grep -q '"Severity"'; then
-            # Construct success message body. Commit SHA is included in a hidden HTML comment for tracking.
+            # Included tracking markers (commit/timestamp) in the success message body 
+            # to ensure it can be found and updated by subsequent runs.
             COMMENT_BODY=$(jq -Rs . <<< "✅ No Vale issues found — great job following the [SUSE Style Guide]($STYLE_GUIDE_URL)! ")
             COMMENT_ID=$(find_existing_comment)
             post_comment "$COMMENT_BODY" "$COMMENT_ID"
             echo "✅ Vale: No issues found on PR #$PR_NUMBER for commit $COMMIT_SHA"
-            exit 0
+            exit 0 # Exit successfully if linting is clean
           fi
 
           # --- CASE 2: Vale issues found ---
@@ -206,7 +208,7 @@ jobs:
           jq -r --arg guide "$STYLE_GUIDE_URL" --argjson max "$MAX_ISSUES" '
             to_entries[] as $file |             # Start by iterating over each file found (key = filename)
             $file.value[] |                     # Then iterate over the list of issues for that file
-            .File = $file.key |                 # Inject the filename (map key) into the issue object
+            .File = $file.key |                 # Inject the filename (map key) into the issue object (required for path display)
             @base64                             # Base64 encode the complete issue object for safe shell piping
           ' vale_output.json | head -n "$MAX_ISSUES" | while read -r line; do
             # Helper function to decode and extract JSON properties
@@ -214,9 +216,10 @@ jobs:
             
             # Extract issue details
             FILE=$(_jq '. | .File // "-"')
-            LINE=$(_jq '. | .Line // "-"')
+            LINE=$(_jq '. | .Line // "-")
             
             # Construct the clickable Markdown link to the specific line in the file at the current commit SHA
+            # This implements the "./file.adoc" clickable path requested earlier
             FILE_LINK="[./$FILE]($GITHUB_REPO_URL/blob/$COMMIT_SHA/$FILE#L$LINE)"
             
             # Format severity with appropriate emoji
@@ -231,7 +234,7 @@ jobs:
             echo "| $FILE_LINK | $LINE | $SEVERITY | $MESSAGE | $SUGGESTION | $RULE | $LINK |" >> vale_report.md
           done
 
-          # Finalize the markdown report
+          # Finalize the markdown report (closing tags and links)
           echo "" >> vale_report.md
           echo "</details>" >> vale_report.md
           echo "" >> vale_report.md
