@@ -3,11 +3,9 @@ name: Vale Linting
 # Trigger this workflow on pull requests that modify docs files anywhere
 on:
   pull_request:
-    # Check for changes to these file types anywhere in the repo
+    # Check for changes to the adoc file types anywhere in the repo
     paths:
-      - '**/*.adoc'  # Changed: Removed 'docs/' prefix
-      - '**/*.md'
-      - '**/*.txt'
+      - '**/*.adoc'  
 
 # Define the permissions this workflow needs
 permissions:
