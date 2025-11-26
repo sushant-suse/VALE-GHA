@@ -177,8 +177,8 @@ jobs:
           # --- CASE 1: No Vale issues found ---
           # Check if the JSON output contains any "Severity" key (the marker for an issue).
           if ! echo "$VALE_OUTPUT" | grep -q '"Severity"'; then
-            # Included tracking markers (commit/timestamp) in the success message body 
-            # to ensure it can be found and updated by subsequent runs (consistency fix).
+            # Ensure full tracking metadata is included in the success message body 
+            # for consistency, reliable update (PATCH), and to avoid silent API failures.
             COMMENT_BODY=$(jq -Rs . <<< "✅ No Vale issues found — great job following the [SUSE Style Guide]($STYLE_GUIDE_URL)! ")
             
             COMMENT_ID=$(find_existing_comment)
@@ -218,7 +218,7 @@ jobs:
             
             # Extract issue details
             FILE=$(_jq '. | .File // "-"')
-            LINE=$(_jq '. | .Line // "-"') # <-- CORRECTED: Closing quote is present here
+            LINE=$(_jq '. | .Line // "-"')
             
             # Construct the clickable Markdown link to the specific line in the file at the current commit SHA
             # This implements the "./file.adoc" clickable path requested earlier (File Link Fix).
@@ -241,7 +241,7 @@ jobs:
           echo "</details>" >> vale_report.md
           echo "" >> vale_report.md
           echo "For more details, see the [SUSE Style Guide]($STYLE_GUIDE_URL)." >> vale_report.md
-          # Removed redundant empty echo lines from the end to ensure consistent content structure.
+          # Ensure full tracking metadata is included at the end for consistent content structure.
           echo "" >> vale_report.md
           echo "" >> vale_report.md
 
