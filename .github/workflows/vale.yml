@@ -176,9 +176,10 @@ jobs:
           # --- CASE 1: No Vale issues found ---
           # Check if the JSON output contains any "Severity" key (the marker for an issue).
           if ! echo "$VALE_OUTPUT" | grep -q '"Severity"'; then
-            # Included tracking markers (commit/timestamp) in the success message body 
-            # to ensure it can be found and updated by subsequent runs.
+            # Use the full, robustly quoted success message with tracking markers.
+            # This prevents the unexpected EOF error and ensures the comment can be updated by future runs.
             COMMENT_BODY=$(jq -Rs . <<< "✅ No Vale issues found — great job following the [SUSE Style Guide]($STYLE_GUIDE_URL)! ")
+            
             COMMENT_ID=$(find_existing_comment)
             post_comment "$COMMENT_BODY" "$COMMENT_ID"
             echo "✅ Vale: No issues found on PR #$PR_NUMBER for commit $COMMIT_SHA"
