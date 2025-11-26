@@ -86,8 +86,8 @@ jobs:
           echo "BasedOnStyles = common" >> .vale.ini
 
       # Step 5: Run Vale and post/update PR comment
-      # This step executes Vale on the modified documentation files and posts/updates the linting report 
-      # directly in the Pull Request comment thread.
+      # This step executes Vale on the modified documentation files and POSTS A NEW REPORT 
+      # FOR EVERY NEW COMMIT (reverting to reliable working behavior).
       - name: Run Vale and Post/Update PR Comment
         # NOTE ON TOKEN: This step is configured for future reusability in the shared repository.
         env:
@@ -149,12 +149,12 @@ jobs:
           COMMENTS_JSON=$(curl -s -H "Authorization: token $GITHUB_TOKEN_VAR" "$COMMENTS_URL")
 
           # Function: Find the ID of the existing Vale Linter report comment.
-          # This function is the key to solving comment spam. It searches for the generic title or success phrase,
-          # allowing the script to reliably UPDATE the old comment instead of posting a new one.
+          # This search is now strict (includes $COMMIT_SHA), ensuring 
+          # that for a new commit, COMMENT_ID is empty, forcing a POST/new comment.
           find_existing_comment() {
             echo "$COMMENTS_JSON" | jq -r ".[] 
               | select(.user.login==\"github-actions[bot]\") 
-              | select(.body | contains(\"Vale Linter Report\") or contains(\"No Vale issues found\")) 
+              | select(.body | contains(\"Vale Linter Report — commit $COMMIT_SHA\") or contains(\"No Vale issues found — commit $COMMIT_SHA\")) 
               | .id" | head -n 1 # Get the ID of the first match found
           }
 
@@ -163,12 +163,12 @@ jobs:
             local body="$1"
             local id="$2"
             if [ -n "$id" ]; then
-              # Update existing comment using PATCH request (to prevent comment spam)
+              # Update existing comment using PATCH request (only happens if the same commit is rerun)
               curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN_VAR" \
                   -d "{\"body\": $body}" \
                   "$COMMENTS_URL/$id" > /dev/null
             else
-              # Post new comment using POST request
+              # Post new comment using POST request (happens on every new commit)
               curl -s -H "Authorization: token $GITHUB_TOKEN_VAR" \
                   -X POST -d "{\"body\": $body}" "$COMMENTS_URL" > /dev/null
             fi
@@ -178,7 +178,7 @@ jobs:
           # Check if the JSON output contains any "Severity" key (the marker for an issue).
           if ! echo "$VALE_OUTPUT" | grep -q '"Severity"'; then
             # Ensure full tracking metadata is included in the success message body 
-            # for consistency, reliable update (PATCH), and to avoid silent API failures.
+            # (including the commit SHA) for robust API POSTing.
             COMMENT_BODY=$(jq -Rs . <<< "✅ No Vale issues found — great job following the [SUSE Style Guide]($STYLE_GUIDE_URL)! ")
             
             COMMENT_ID=$(find_existing_comment)
@@ -206,7 +206,7 @@ jobs:
           echo "| File | Line | Severity | Message | Suggestion | Rule | Rule Link |" >> vale_report.md
           echo "|------|------|---------|--------|------------|------|-----------|" >> vale_report.md
 
-          # Process and format individual issues (up to MAX_ISSUES)
+          # Process and format individual issues (up: to MAX_ISSUES)
           jq -r --arg guide "$STYLE_GUIDE_URL" --argjson max "$MAX_ISSUES" '
             to_entries[] as $file |             # Start by iterating over each file found (key = filename)
             $file.value[] |                     # Then iterate over the list of issues for that file
@@ -221,7 +221,6 @@ jobs:
             LINE=$(_jq '. | .Line // "-"')
             
             # Construct the clickable Markdown link to the specific line in the file at the current commit SHA
-            # This implements the "./file.adoc" clickable path requested earlier (File Link Fix).
             FILE_LINK="[./$FILE]($GITHUB_REPO_URL/blob/$COMMIT_SHA/$FILE#L$LINE)"
             
             # Format severity with appropriate emoji
@@ -248,11 +247,10 @@ jobs:
           # Convert the complete markdown report file content into a single JSON string for the API payload.
           COMMENT_BODY=$(jq -Rs . < vale_report.md)
           
-          # Check for and retrieve the ID of the previous report comment
+          # Check for and retrieve the ID of the previous report comment (will likely be empty on new commits)
           COMMENT_ID=$(find_existing_comment)
           
           # Post or update the comment
           post_comment "$COMMENT_BODY" "$COMMENT_ID"
 
           echo "✅ Vale report posted/updated on PR #$PR_NUMBER for commit $COMMIT_SHA"
-          # The job completes successfully regardless of linting severity, as the issue status is only reported.
