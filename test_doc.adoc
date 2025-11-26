@@ -6,4 +6,3 @@ The user's actions will be analyzed for errors. We can't really do nothing to st
 
 I have some CD's on my shelf.
 I have some CD's on my shelf number-2.
-I have some CD's on my shelf number-3.

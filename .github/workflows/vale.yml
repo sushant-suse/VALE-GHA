@@ -86,47 +86,45 @@ jobs:
           echo "BasedOnStyles = common" >> .vale.ini
 
       # Step 5: Run Vale and post/update PR comment
-      # This step runs Vale on only the changed files and posts the report back to the PR.
+      # This step executes Vale on the modified documentation files and posts/updates the linting report 
+      # directly in the Pull Request comment thread.
       - name: Run Vale and Post/Update PR Comment
-        # NOTE ON TOKEN: When this workflow is used in a shared/external repository (i.e., called by another repo), 
-        # the token passed here must have 'pull-requests:write' permissions on the target repository.
         env:
-          # GITHUB_TOKEN is automatically granted necessary permissions when running in the same repo.
-          # We use EXTERNAL_TOKEN to prepare for future cross-repo use.
+          # Currently uses the automatically provided GITHUB_TOKEN (works within the same repo).
           EXTERNAL_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
         run: |
-          # Ensure the script exits immediately if any command fails
+          # Use 'set -e' to ensure the script fails immediately if any command encounters an error.
           set -e
 
-          # Ensure we are operating from the repository root ($GITHUB_WORKSPACE)
+          # Change directory to the repository root for correct file path resolution
           cd "$GITHUB_WORKSPACE"
 
-          # Assign the token from the environment variable to a local variable for API calls (curl)
+          # Assign the token from the environment variable to a local shell variable for API calls
           GITHUB_TOKEN_VAR="$EXTERNAL_TOKEN"
 
-          # Define constants
+          # Define constants used in the report and API logic
           STYLE_GUIDE_URL="https://documentation.suse.com/style/current/html/style-guide-adoc/index.html"
-          MAX_ISSUES=50
+          MAX_ISSUES=50 # Maximum number of issues to display in the collapsible table
 
           echo "=== Fetching changed files using git diff ==="
 
-          # Get essential PR and commit details from the GitHub event payload
+          # Get essential PR and commit details from the GitHub event payload JSON
           PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
           BASE_SHA=$(jq -r .pull_request.base.sha < "$GITHUB_EVENT_PATH")
           COMMIT_SHA=$(jq -r .pull_request.head.sha < "$GITHUB_EVENT_PATH")
 
-          # API endpoint for PR comments
+          # Construct the base API endpoint for PR comments
           COMMENTS_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
+          
+          # Construct the base repository URL for creating clickable file links in the report
+          GITHUB_REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
 
-          # Use git diff to find files modified between the PR's base and head commits.
-          # --name-only: Output only file names
-          # --diff-filter=d: Exclude deleted files (only lint changes/additions)
-          # grep -E '\.(adoc|md|txt)$': Filter for the specific documentation file extensions anywhere in the repo.
-          # || true: Prevents the script from failing if grep finds no matching files.
+          # Use git diff to find file paths modified between the PR's base and head commits.
+          # Filter to exclude deleted files (--diff-filter=d) and match documentation extensions.
           CHANGED_FILES=$(git diff --name-only --diff-filter=d "$BASE_SHA" "$COMMIT_SHA" \
-            | grep -E '\.(adoc|md|txt)$' || true)
+            | grep -E '\.(adoc|md|txt)$' || true) # || true prevents script exit if no files are found
 
-          # Check if any relevant files were modified.
+          # Check if any relevant files were modified. If not, exit gracefully.
           if [ -z "$CHANGED_FILES" ]; then
             echo "No relevant files (.adoc, .md, .txt) changed in this PR. Skipping Vale linting."
             exit 0
@@ -137,46 +135,47 @@ jobs:
 
           echo "=== Running Vale ==="
 
-          # Run Vale on the list of changed files.
-          # --output=JSON: Get machine-readable output.
-          # --no-exit: Prevents the Vale CLI from exiting with a non-zero code on linting errors, 
-          # allowing the script to continue to the commenting step.
+          # Execute Vale on the list of changed files.
+          # --output=JSON: Ensures machine-readable JSON output.
+          # --no-exit: Ensures the script continues even if linting errors are found.
           VALE_OUTPUT=$(echo "$CHANGED_FILES" | xargs /usr/local/bin/vale --config="$GITHUB_WORKSPACE/.vale.ini" --output=JSON --no-exit || true)
 
-          # Save JSON output for subsequent parsing by jq.
+          # Save the raw JSON output to a file for structured parsing.
           echo "$VALE_OUTPUT" | jq '.' > vale_output.json
 
           # Fetch all existing comments on this PR using the authorized token.
           COMMENTS_JSON=$(curl -s -H "Authorization: token $GITHUB_TOKEN_VAR" "$COMMENTS_URL")
 
-          # Function: Find the ID of an existing Vale Linter report comment posted by the GitHub Actions bot.
+          # Function: Find the ID of the existing Vale Linter report comment.
+          # Removed the $COMMIT_SHA check. This ensures the action finds and 
+          # updates the SINGLE existing Vale report comment, rather than posting a new one for every commit.
           find_existing_comment() {
             echo "$COMMENTS_JSON" | jq -r ".[] 
               | select(.user.login==\"github-actions[bot]\") 
-              | select(.body | contains(\"Vale Linter Report — commit $COMMIT_SHA\") or contains(\"No Vale issues found — commit $COMMIT_SHA\")) 
-              | .id" | head -n 1
+              | select(.body | contains(\"Vale Linter Report\")) # Search for the generic title header
+              | .id" | head -n 1 # Get the ID of the first match
           }
 
-          # Function: Post a new comment or update an existing one using the determined ID.
+          # Function: Post a new comment or update an existing one (PATCH vs. POST request).
           post_comment() {
             local body="$1"
             local id="$2"
             if [ -n "$id" ]; then
-              # Update existing comment (PATCH request)
+              # Update existing comment using PATCH request
               curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN_VAR" \
                   -d "{\"body\": $body}" \
                   "$COMMENTS_URL/$id" > /dev/null
             else
-              # Post new comment (POST request)
+              # Post new comment using POST request
               curl -s -H "Authorization: token $GITHUB_TOKEN_VAR" \
                   -X POST -d "{\"body\": $body}" "$COMMENTS_URL" > /dev/null
             fi
           }
 
           # --- CASE 1: No Vale issues found ---
-          # Check if the JSON output contains any "Severity" key (indicating an issue).
+          # Check if the JSON output contains any "Severity" key (the marker for an issue).
           if ! echo "$VALE_OUTPUT" | grep -q '"Severity"'; then
-            # Prepare a success message body (must be a single JSON string).
+            # Construct success message body. Commit SHA is included in a hidden HTML comment for tracking.
             COMMENT_BODY=$(jq -Rs . <<< "✅ No Vale issues found — great job following the [SUSE Style Guide]($STYLE_GUIDE_URL)! ")
             COMMENT_ID=$(find_existing_comment)
             post_comment "$COMMENT_BODY" "$COMMENT_ID"
@@ -185,16 +184,16 @@ jobs:
           fi
 
           # --- CASE 2: Vale issues found ---
-          # Count the total number of errors and warnings using jq.
+          # Count errors and warnings using jq for the summary
           ERRORS=$(jq '[.[][] | select(.Severity=="error")] | length' vale_output.json)
           WARNINGS=$(jq '[.[][] | select(.Severity=="warning")] | length' vale_output.json)
 
-          # Start building markdown report file
+          # Start building the Markdown report file
           echo "### 📝 Vale Linter Report — commit $COMMIT_SHA — $(date -u +"%Y-%m-%d %H:%M UTC")" > vale_report.md
           echo "" >> vale_report.md
           echo "**Summary:** $ERRORS ❌ errors, $WARNINGS ⚠️ warnings" >> vale_report.md
           echo "" >> vale_report.md
-          # Use a collapsible section to keep the PR comment clean
+          # Start the collapsible section
           echo "<details>" >> vale_report.md
           echo "<summary>Click to expand Vale issues (max $MAX_ISSUES)</summary>" >> vale_report.md
           echo "" >> vale_report.md
@@ -205,29 +204,31 @@ jobs:
 
           # Process and format individual issues (up to MAX_ISSUES)
           jq -r --arg guide "$STYLE_GUIDE_URL" --argjson max "$MAX_ISSUES" '
-            to_entries[] as $file |             # $file contains both the key (filename) and value (issues array)
-            $file.value[] |                     # Iterate over issues in that file
-            .File = $file.key |                 # **FIX**: Explicitly set the .File field using the filename from the key
-            @base64                             # Base64 encode the modified issue object for safe shell piping
+            to_entries[] as $file |             # Start by iterating over each file found (key = filename)
+            $file.value[] |                     # Then iterate over the list of issues for that file
+            .File = $file.key |                 # Inject the filename (map key) into the issue object
+            @base64                             # Base64 encode the complete issue object for safe shell piping
           ' vale_output.json | head -n "$MAX_ISSUES" | while read -r line; do
-            # Helper function to decode and extract data for the current issue
+            # Helper function to decode and extract JSON properties
             _jq() { echo "$line" | base64 --decode | jq -r "$1"; }
             
             # Extract issue details
-            # We use '-' as a clean fallback if the value is somehow missing
             FILE=$(_jq '. | .File // "-"')
             LINE=$(_jq '. | .Line // "-"')
-            # Format severity with emoji
+            
+            # Construct the clickable Markdown link to the specific line in the file at the current commit SHA
+            FILE_LINK="[./$FILE]($GITHUB_REPO_URL/blob/$COMMIT_SHA/$FILE#L$LINE)"
+            
+            # Format severity with appropriate emoji
             SEVERITY=$(_jq 'if .Severity=="error" then "❌ error" elif .Severity=="warning" then "⚠️ warning" else .Severity end')
             MESSAGE=$(_jq '.Message // "-"')
-            # Suggestion is typically the first item in the Action.Params array
             SUGGESTION=$(_jq '.Action.Params[0] // "-"')
             RULE=$(_jq '.Check // "-"')
-            # Create a link to the corresponding section of the style guide (rule name is lowercased)
+            # Create a link to the corresponding rule section in the SUSE Style Guide
             LINK="[link]($STYLE_GUIDE_URL#$(echo $RULE | tr '[:upper:]' '[:lower:]'))"
 
-            # Append the row to the markdown report file
-            echo "| $FILE | $LINE | $SEVERITY | $MESSAGE | $SUGGESTION | $RULE | $LINK |" >> vale_report.md
+            # Append the row to the markdown report file, using the clickable FILE_LINK
+            echo "| $FILE_LINK | $LINE | $SEVERITY | $MESSAGE | $SUGGESTION | $RULE | $LINK |" >> vale_report.md
           done
 
           # Finalize the markdown report
@@ -238,14 +239,14 @@ jobs:
           echo "" >> vale_report.md
           echo "" >> vale_report.md
 
-          # Convert the complete markdown report file content into a single JSON string for the GitHub API payload.
+          # Convert the complete markdown report file content into a single JSON string for the API payload.
           COMMENT_BODY=$(jq -Rs . < vale_report.md)
           
-          # Check if a previous comment exists and get its ID
+          # Check for and retrieve the ID of the previous report comment
           COMMENT_ID=$(find_existing_comment)
           
-          # Post the report (updates existing or posts new)
+          # Post or update the comment
           post_comment "$COMMENT_BODY" "$COMMENT_ID"
 
           echo "✅ Vale report posted/updated on PR #$PR_NUMBER for commit $COMMIT_SHA"
-          # The job will successfully complete here regardless of linting errors, as the goal is simply to report the status.
+          # The job completes successfully regardless of linting severity, as the issue status is only reported.
