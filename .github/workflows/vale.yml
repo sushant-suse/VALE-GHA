@@ -88,20 +88,20 @@ jobs:
       # Step 5: Run Vale and post/update PR comment
       # This step runs Vale on only the changed files and posts the report back to the PR.
       - name: Run Vale and Post/Update PR Comment
-        # TODO: When moving to a shared action, we should replace the GITHUB_TOKEN with a token passed as an input 
-        # Currently using EXTERNAL_TOKEN inside the script to ensure flexibility.
+        # NOTE ON TOKEN: When this workflow is used in a shared/external repository (i.e., called by another repo), 
+        # the token passed here must have 'pull-requests:write' permissions on the target repository.
         env:
-          # GITHUB_TOKEN has write access for commenting on the PR (in the same repo).
-          # This value will be assigned to GITHUB_TOKEN_VAR in the script below.
+          # GITHUB_TOKEN is automatically granted necessary permissions when running in the same repo.
+          # We use EXTERNAL_TOKEN to prepare for future cross-repo use.
           EXTERNAL_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
         run: |
           # Ensure the script exits immediately if any command fails
           set -e
 
-          # Ensure we are operating from the repository root
+          # Ensure we are operating from the repository root ($GITHUB_WORKSPACE)
           cd "$GITHUB_WORKSPACE"
 
-          # Assign the token from the environment variable to a local variable for API calls
+          # Assign the token from the environment variable to a local variable for API calls (curl)
           GITHUB_TOKEN_VAR="$EXTERNAL_TOKEN"
 
           # Define constants
@@ -205,18 +205,17 @@ jobs:
 
           # Process and format individual issues (up to MAX_ISSUES)
           jq -r --arg guide "$STYLE_GUIDE_URL" --argjson max "$MAX_ISSUES" '
-            # Iterate over files (top-level objects)
-            to_entries[] as $file |
-            # Iterate over issues within each file
-            $file.value[] |
-            # Base64 encode each issue for safe piping through the shell loop
-            @base64
+            to_entries[] as $file |             # $file contains both the key (filename) and value (issues array)
+            $file.value[] |                     # Iterate over issues in that file
+            .File = $file.key |                 # **FIX**: Explicitly set the .File field using the filename from the key
+            @base64                             # Base64 encode the modified issue object for safe shell piping
           ' vale_output.json | head -n "$MAX_ISSUES" | while read -r line; do
             # Helper function to decode and extract data for the current issue
             _jq() { echo "$line" | base64 --decode | jq -r "$1"; }
             
             # Extract issue details
-            FILE=$(_jq '. | .File // empty')
+            # We use '-' as a clean fallback if the value is somehow missing
+            FILE=$(_jq '. | .File // "-"')
             LINE=$(_jq '. | .Line // "-"')
             # Format severity with emoji
             SEVERITY=$(_jq 'if .Severity=="error" then "❌ error" elif .Severity=="warning" then "⚠️ warning" else .Severity end')
@@ -224,7 +223,7 @@ jobs:
             # Suggestion is typically the first item in the Action.Params array
             SUGGESTION=$(_jq '.Action.Params[0] // "-"')
             RULE=$(_jq '.Check // "-"')
-            # Create a link to the corresponding section of the style guide (requires rule name to be lowercased)
+            # Create a link to the corresponding section of the style guide (rule name is lowercased)
             LINK="[link]($STYLE_GUIDE_URL#$(echo $RULE | tr '[:upper:]' '[:lower:]'))"
 
             # Append the row to the markdown report file
