@@ -217,7 +217,7 @@ jobs:
             
             # Extract issue details
             FILE=$(_jq '. | .File // "-"')
-            LINE=$(_jq '. | .Line // "-")
+            LINE=$(_jq '. | .Line // "-"')
             
             # Construct the clickable Markdown link to the specific line in the file at the current commit SHA
             # This implements the "./file.adoc" clickable path requested earlier
