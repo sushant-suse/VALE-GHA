@@ -1,13 +1,13 @@
 name: Vale Linting
 
-# Trigger this workflow on pull requests that modify docs files
+# Trigger this workflow on pull requests that modify docs files anywhere
 on:
   pull_request:
-    # Only run on changes to these file types in the docs folder
+    # Check for changes to these file types anywhere in the repo
     paths:
-      - 'docs/**/*.adoc'
-      - 'docs/**/*.md'
-      - 'docs/**/*.txt'
+      - '**/*.adoc'  # Changed: Removed 'docs/' prefix
+      - '**/*.md'
+      - '**/*.txt'
 
 # Define the permissions this workflow needs
 permissions:
